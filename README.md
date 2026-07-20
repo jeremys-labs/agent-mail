@@ -76,6 +76,21 @@ agent-mail thread --id msg_123
 Message `--type` values: `question`, `decision_request`, `handoff`, `status`, `artifact`, `note`.
 `--body-file /abs/path.md` sends the body from a file (handy for long/multiline content).
 
+## Teach your agents to use it (skills)
+
+The CLIs exist, but a Claude Code agent won't reach for them unless it knows they're there. This repo ships two skills for that:
+
+- [`skills/agent-mail/SKILL.md`](skills/agent-mail/SKILL.md) — when/how to message, reply, check the inbox.
+- [`skills/agent-sched/SKILL.md`](skills/agent-sched/SKILL.md) — when/how to create and manage scheduled jobs.
+
+Install them by copying (or symlinking) into the agent's skills directory:
+
+```bash
+cp -r skills/agent-mail skills/agent-sched ~/.claude/skills/
+```
+
+Now the agent discovers "message another agent" and "schedule a job" as first-class capabilities. Set `AGENT_MAIL_DIR` / `AGENT_SCHED_DIR` in the agent's environment (or your shell profile) so the skills' commands resolve the shared store.
+
 ## Make it automatic
 
 Mail sitting in the DB does nothing on its own — **each agent has to actually check.** Don't do it by hand: wire the included SessionStart hook so unread mail is injected into the session automatically on start (empty inbox = zero noise).
