@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import fs from 'fs';
-import { createAgentMailStore, type AgentMailPriority, type AgentMailStatus, type AgentMailType } from './index.js';
+import {
+  createAgentMailStore,
+  formatAgentMailForRuntime,
+  type AgentMailPriority,
+  type AgentMailStatus,
+  type AgentMailType,
+} from './index.js';
 import { validateSingleRecipient } from './recipients.js';
 
 interface ParsedArgs {
@@ -64,7 +70,9 @@ Usage: agent-mail <command> [options]
 Commands:
   send    --from <agent> --to <agent> --type <type> --subject <s> (--body <md> | --body-file <path>)
           [--project <p>] [--priority low|normal|high] [--requires-response]
-  inbox   --agent <agent> [--status new|acked|closed]   (closed excluded unless --status given)
+  inbox   --agent <agent> [--status new|acked|closed] [--format prompt]
+          (closed excluded unless --status given; --format prompt emits
+           runtime-injection blocks, or nothing when the inbox is empty)
   ack     --agent <agent> --id <messageId>
   reply   --agent <agent> --id <messageId> (--body <md> | --body-file <path>)
           [--subject <s>] [--priority low|normal|high] [--requires-response]
@@ -118,6 +126,15 @@ function main(): void {
           agent: getRequired(options, 'agent'),
           status: getOptional(options, 'status') as AgentMailStatus | undefined,
         });
+        if (getOptional(options, 'format') === 'prompt') {
+          // Runtime-injection format: one [Agent Mail] block per message, or
+          // nothing at all when the inbox is empty (so a SessionStart hook that
+          // pipes this in adds zero noise when there's no mail).
+          if (messages.length > 0) {
+            process.stdout.write(messages.map(formatAgentMailForRuntime).join('\n'));
+          }
+          break;
+        }
         printJson(messages);
         break;
       }

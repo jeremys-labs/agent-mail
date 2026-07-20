@@ -69,9 +69,11 @@ agent-mail thread --id msg_123
 Message `--type` values: `question`, `decision_request`, `handoff`, `status`, `artifact`, `note`.
 `--body-file /abs/path.md` sends the body from a file (handy for long/multiline content).
 
-## The one thing people forget
+## Make it automatic
 
-Mail sitting in the DB does nothing on its own. **Each agent has to actually check.** Either poll `agent-mail inbox --agent <you> --status new` on a timer, or wire a SessionStart hook that reads unread mail and injects it into the session. Without that, messages just pile up unread.
+Mail sitting in the DB does nothing on its own — **each agent has to actually check.** Don't do it by hand: wire the included SessionStart hook so unread mail is injected into the session automatically on start (empty inbox = zero noise).
+
+See **[`hooks/README.md`](hooks/README.md)** for the drop-in script + `settings.json` snippet. The CLI backs it with `agent-mail inbox --agent <you> --status new --format prompt`, which emits runtime-injection blocks (or nothing when the inbox is empty).
 
 ## Programmatic use
 
