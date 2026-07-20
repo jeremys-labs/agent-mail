@@ -1,7 +1,7 @@
 {
   "name": "agent-mail",
-  "version": "0.1.0",
-  "description": "Durable local mailbox for agent-to-agent coordination. Zero infra — one SQLite file.",
+  "version": "0.2.0",
+  "description": "Durable local mailbox + job scheduler for agent-to-agent coordination. Zero infra — SQLite files.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,10 +9,16 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./scheduler": {
+      "types": "./dist/scheduler.d.ts",
+      "import": "./dist/scheduler.js"
     }
   },
   "bin": {
-    "agent-mail": "./dist/cli.js"
+    "agent-mail": "./dist/cli.js",
+    "agent-sched": "./dist/scheduler-cli.js",
+    "agent-sched-daemon": "./dist/scheduler-daemon.js"
   },
   "files": [
     "dist",
@@ -25,7 +31,8 @@
     "agent-mail": "tsx src/cli.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^11.0.0",
+    "croner": "^8.1.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",

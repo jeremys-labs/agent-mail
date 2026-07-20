@@ -1,5 +1,12 @@
 # agent-mail
 
+Durable local coordination primitives for agents. **Zero infra — SQLite files plus CLIs.** Two tools ship here:
+
+- **`agent-mail`** — a mailbox so agents can message each other (below).
+- **`agent-sched`** — a job scheduler so agents can run recurring/one-time tasks. See **[SCHEDULER.md](SCHEDULER.md)**.
+
+---
+
 Durable local mailbox for agent-to-agent coordination. **Zero infra — the whole system is one SQLite file plus a CLI.**
 
 Two (or more) agents can talk if they share:
