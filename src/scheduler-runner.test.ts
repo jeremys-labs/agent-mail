@@ -43,4 +43,17 @@ describe('runJob', () => {
     expect(result.exitCode).toBe(3);
     expect(store.get(job.id)?.lastStatus).toBe('error');
   });
+
+  it('kills a job that overruns its timeout and records error', async () => {
+    const job = store.add({
+      name: 'hang',
+      runAt: new Date(Date.now() + 1000).toISOString(),
+      command: 'sleep 30',
+      timeoutMs: 300,
+    });
+    const result = await runJob(job, store, logDir);
+    expect(result.status).toBe('error');
+    expect(fs.readFileSync(result.logPath, 'utf8')).toContain('timeout');
+    expect(store.get(job.id)?.lastStatus).toBe('error');
+  }, 10_000);
 });

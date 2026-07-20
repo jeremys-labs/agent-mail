@@ -4,6 +4,7 @@ import {
   createSchedulerStore,
   resolveSchedulerLogDir,
   type CreateJobInput,
+  type NotifyOn,
 } from './scheduler.js';
 import { runJob } from './scheduler-runner.js';
 
@@ -52,9 +53,14 @@ Usage: agent-sched <command> [options]
 Commands:
   add      --name <n> (--cron "<expr>" | --at "<iso>")
            (--prompt "<task>" [--claude-args "<args>"] | --command "<shell>")
-           [--cwd <path>] [--agent <label>]
+           [--cwd <path>] [--agent <label>] [--timeout-ms <n>]
+           [--notify <agent>] [--notify-on always|error]
              --prompt builds a headless "claude -p <task>" run (default fire).
              --command runs any shell command instead.
+             --notify raises the run's result to <agent> via agent-mail so
+               failures/results surface in a live session (default: always;
+               --notify-on error sends only on failure).
+             --timeout-ms kills a run that overruns so it can't wedge the daemon.
   list     [--all]                 List jobs (default: all; --all is a no-op alias)
   get      --id <jobId>            Show one job
   remove   --id <jobId>            Delete a job
@@ -93,6 +99,7 @@ async function main(): Promise<void> {
         const finalCommand = promptText
           ? buildClaudePromptCommand(promptText, getOptional(options, 'claude-args'))
           : rawCommand!;
+        const timeoutRaw = getOptional(options, 'timeout-ms');
         const input: CreateJobInput = {
           name: getRequired(options, 'name'),
           cron: getOptional(options, 'cron'),
@@ -100,6 +107,9 @@ async function main(): Promise<void> {
           command: finalCommand,
           cwd: getOptional(options, 'cwd'),
           agent: getOptional(options, 'agent'),
+          timeoutMs: timeoutRaw !== undefined ? Number(timeoutRaw) : undefined,
+          notifyAgent: getOptional(options, 'notify'),
+          notifyOn: getOptional(options, 'notify-on') as NotifyOn | undefined,
         };
         printJson(store.add(input));
         break;

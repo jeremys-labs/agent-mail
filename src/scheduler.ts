@@ -9,6 +9,7 @@ export const DEFAULT_AGENT_SCHED_DIR = path.join(os.homedir(), '.agent-comms', '
 
 export type ScheduleKind = 'cron' | 'once';
 export type JobRunStatus = 'ok' | 'error';
+export type NotifyOn = 'always' | 'error';
 
 export interface ScheduledJob {
   id: string;
@@ -19,7 +20,12 @@ export interface ScheduledJob {
   command: string;
   cwd: string | null;
   agent: string | null;
+  timeoutMs: number | null;
+  notifyAgent: string | null;
+  notifyOn: NotifyOn;
   enabled: boolean;
+  running: boolean;
+  claimedAt: string | null;
   createdAt: string;
   lastRunAt: string | null;
   lastStatus: JobRunStatus | null;
@@ -34,6 +40,9 @@ export interface CreateJobInput {
   command: string;
   cwd?: string;
   agent?: string;
+  timeoutMs?: number;
+  notifyAgent?: string;
+  notifyOn?: NotifyOn;
 }
 
 export interface JobRunResult {
@@ -53,7 +62,12 @@ interface JobRow {
   command: string;
   cwd: string | null;
   agent: string | null;
+  timeout_ms: number | null;
+  notify_agent: string | null;
+  notify_on: NotifyOn | null;
   enabled: number;
+  running: number;
+  claimed_at: string | null;
   created_at: string;
   last_run_at: string | null;
   last_status: JobRunStatus | null;
@@ -106,7 +120,12 @@ function mapJobRow(row: JobRow): ScheduledJob {
     command: row.command,
     cwd: row.cwd,
     agent: row.agent,
+    timeoutMs: row.timeout_ms,
+    notifyAgent: row.notify_agent,
+    notifyOn: row.notify_on ?? 'always',
     enabled: Boolean(row.enabled),
+    running: Boolean(row.running),
+    claimedAt: row.claimed_at,
     createdAt: row.created_at,
     lastRunAt: row.last_run_at,
     lastStatus: row.last_status,
@@ -146,10 +165,24 @@ export interface SchedulerStore {
   get(id: string): ScheduledJob | null;
   remove(id: string): boolean;
   setEnabled(id: string, enabled: boolean): ScheduledJob | null;
-  /** Jobs that are enabled and due at or before `now`. */
+  /** Read-only peek at enabled, due, not-already-running jobs. Does NOT claim. */
   dueJobs(now: Date): ScheduledJob[];
-  /** Record a completed run and advance/retire the schedule. */
-  recordRun(id: string, status: JobRunStatus, exitCode: number | null, ranAt: Date): ScheduledJob | null;
+  /**
+   * Atomically claim enabled+due+idle jobs (sets running=1, claimed_at). Only
+   * claimed jobs should be executed — this is the lease that stops a second
+   * daemon (or a double-started launchd job) from firing the same slot twice.
+   */
+  claimDueJobs(now: Date): ScheduledJob[];
+  /**
+   * Record a completed run: clear the running lease, advance the cron from the
+   * completion time (skipping missed intervals), or retire a one-time job.
+   */
+  recordRun(id: string, status: JobRunStatus, exitCode: number | null, completedAt: Date): ScheduledJob | null;
+  /**
+   * Release running leases claimed before `now - staleMs` — recovers jobs whose
+   * daemon crashed mid-run so they aren't wedged as running forever.
+   */
+  reclaimStale(now: Date, staleMs: number): number;
   close(): void;
 }
 
@@ -167,7 +200,12 @@ export function createSchedulerStore(dbPath = resolveSchedulerDbPath()): Schedul
       command TEXT NOT NULL,
       cwd TEXT,
       agent TEXT,
+      timeout_ms INTEGER,
+      notify_agent TEXT,
+      notify_on TEXT,
       enabled INTEGER NOT NULL DEFAULT 1,
+      running INTEGER NOT NULL DEFAULT 0,
+      claimed_at TEXT,
       created_at TEXT NOT NULL,
       last_run_at TEXT,
       last_status TEXT,
@@ -175,6 +213,18 @@ export function createSchedulerStore(dbPath = resolveSchedulerDbPath()): Schedul
       next_run_at TEXT
     );
   `);
+
+  // Idempotent migration for stores created before the lease/timeout columns.
+  const existingCols = new Set((db.prepare('PRAGMA table_info(jobs)').all() as { name: string }[]).map((c) => c.name));
+  for (const [col, ddl] of [
+    ['timeout_ms', 'ALTER TABLE jobs ADD COLUMN timeout_ms INTEGER'],
+    ['notify_agent', 'ALTER TABLE jobs ADD COLUMN notify_agent TEXT'],
+    ['notify_on', 'ALTER TABLE jobs ADD COLUMN notify_on TEXT'],
+    ['running', 'ALTER TABLE jobs ADD COLUMN running INTEGER NOT NULL DEFAULT 0'],
+    ['claimed_at', 'ALTER TABLE jobs ADD COLUMN claimed_at TEXT'],
+  ] as const) {
+    if (!existingCols.has(col)) db.exec(ddl);
+  }
 
   return {
     add(input: CreateJobInput): ScheduledJob {
@@ -203,9 +253,19 @@ export function createSchedulerStore(dbPath = resolveSchedulerDbPath()): Schedul
             : `Cron "${cron}" produced no future run.`,
         );
       }
+      if (input.timeoutMs !== undefined && (!Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0)) {
+        throw new Error(`--timeout-ms must be a positive number: ${input.timeoutMs}`);
+      }
+      if (input.notifyOn && input.notifyOn !== 'always' && input.notifyOn !== 'error') {
+        throw new Error(`--notify-on must be "always" or "error": ${input.notifyOn}`);
+      }
+      // notify_on only means something with a target; default to "always" when a
+      // target is set so results AND failures surface unless narrowed to error.
+      const notifyAgent = input.notifyAgent ?? null;
+      const notifyOn: NotifyOn | null = notifyAgent ? input.notifyOn ?? 'always' : null;
       db.prepare(
-        `INSERT INTO jobs (id, name, schedule_kind, cron, run_at, command, cwd, agent, enabled, created_at, next_run_at)
-         VALUES (@id, @name, @schedule_kind, @cron, @run_at, @command, @cwd, @agent, 1, @created_at, @next_run_at)`,
+        `INSERT INTO jobs (id, name, schedule_kind, cron, run_at, command, cwd, agent, timeout_ms, notify_agent, notify_on, enabled, running, created_at, next_run_at)
+         VALUES (@id, @name, @schedule_kind, @cron, @run_at, @command, @cwd, @agent, @timeout_ms, @notify_agent, @notify_on, 1, 0, @created_at, @next_run_at)`,
       ).run({
         id,
         name: input.name,
@@ -215,6 +275,9 @@ export function createSchedulerStore(dbPath = resolveSchedulerDbPath()): Schedul
         command: input.command,
         cwd: input.cwd ?? null,
         agent: input.agent ?? null,
+        timeout_ms: input.timeoutMs ?? null,
+        notify_agent: notifyAgent,
+        notify_on: notifyOn,
         created_at: now.toISOString(),
         next_run_at: nextRunAt,
       });
@@ -249,29 +312,56 @@ export function createSchedulerStore(dbPath = resolveSchedulerDbPath()): Schedul
 
     dueJobs(now: Date): ScheduledJob[] {
       const rows = db
-        .prepare('SELECT * FROM jobs WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at')
+        .prepare(
+          'SELECT * FROM jobs WHERE enabled = 1 AND running = 0 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at',
+        )
         .all(now.toISOString()) as JobRow[];
       return rows.map(mapJobRow);
     },
 
-    recordRun(id: string, status: JobRunStatus, exitCode: number | null, ranAt: Date): ScheduledJob | null {
+    claimDueJobs(now: Date): ScheduledJob[] {
+      // Single atomic statement: only idle, enabled, due rows flip to running and
+      // are returned. A concurrent daemon's identical statement can't re-claim a
+      // row this one already flipped, so a due slot fires exactly once.
+      const nowIso = now.toISOString();
+      const rows = db
+        .prepare(
+          `UPDATE jobs SET running = 1, claimed_at = @now
+           WHERE enabled = 1 AND running = 0 AND next_run_at IS NOT NULL AND next_run_at <= @now
+           RETURNING *`,
+        )
+        .all({ now: nowIso }) as JobRow[];
+      return rows.map(mapJobRow);
+    },
+
+    recordRun(id: string, status: JobRunStatus, exitCode: number | null, completedAt: Date): ScheduledJob | null {
       const job = this.get(id);
       if (!job) return null;
-      // Advance from ranAt so a slow run can't re-fire the same slot.
-      const nextRunAt = job.scheduleKind === 'once' ? null : computeNextRun(job, ranAt);
+      // Advance the cron from the COMPLETION time, not the start — a long run
+      // that overshoots its next slot skips the missed interval instead of
+      // firing repeatedly to catch up. Also clears the running lease.
+      const nextRunAt = job.scheduleKind === 'once' ? null : computeNextRun(job, completedAt);
       const stillEnabled = job.scheduleKind === 'once' ? 0 : job.enabled ? 1 : 0;
       db.prepare(
         `UPDATE jobs SET last_run_at = @last_run_at, last_status = @last_status,
-         last_exit_code = @last_exit_code, next_run_at = @next_run_at, enabled = @enabled WHERE id = @id`,
+         last_exit_code = @last_exit_code, next_run_at = @next_run_at, enabled = @enabled,
+         running = 0, claimed_at = NULL WHERE id = @id`,
       ).run({
         id,
-        last_run_at: ranAt.toISOString(),
+        last_run_at: completedAt.toISOString(),
         last_status: status,
         last_exit_code: exitCode,
         next_run_at: nextRunAt,
         enabled: stillEnabled,
       });
       return this.get(id);
+    },
+
+    reclaimStale(now: Date, staleMs: number): number {
+      const cutoff = new Date(now.getTime() - staleMs).toISOString();
+      return db
+        .prepare('UPDATE jobs SET running = 0, claimed_at = NULL WHERE running = 1 AND (claimed_at IS NULL OR claimed_at < ?)')
+        .run(cutoff).changes;
     },
 
     close(): void {

@@ -91,6 +91,58 @@ describe('createSchedulerStore', () => {
   });
 });
 
+describe('claim/lease', () => {
+  it('claimDueJobs flips due jobs to running and returns them once', () => {
+    const at = new Date(Date.now() - 1).toISOString();
+    // Add via a future time then force-due by rewriting next_run_at through a run cycle
+    const job = store.add({ name: 'due', runAt: new Date(Date.now() + 1000).toISOString(), command: 'echo hi' });
+    const after = new Date(Date.now() + 120_000);
+    const firstClaim = store.claimDueJobs(after);
+    expect(firstClaim.map((j) => j.id)).toContain(job.id);
+    expect(store.get(job.id)?.running).toBe(true);
+    // A second claim in the same window returns nothing — already leased.
+    const secondClaim = store.claimDueJobs(after);
+    expect(secondClaim.map((j) => j.id)).not.toContain(job.id);
+    void at;
+  });
+
+  it('recordRun clears the running lease', () => {
+    const job = store.add({ name: 'due', runAt: new Date(Date.now() + 1000).toISOString(), command: 'echo hi' });
+    store.claimDueJobs(new Date(Date.now() + 120_000));
+    expect(store.get(job.id)?.running).toBe(true);
+    store.recordRun(job.id, 'ok', 0, new Date());
+    expect(store.get(job.id)?.running).toBe(false);
+  });
+
+  it('reclaimStale releases leases older than the cutoff', () => {
+    const job = store.add({ name: 'due', runAt: new Date(Date.now() + 1000).toISOString(), command: 'echo hi' });
+    const claimAt = new Date(Date.now() + 2000); // just past the job's runAt so it's due
+    store.claimDueJobs(claimAt);
+    expect(store.get(job.id)?.running).toBe(true);
+    const checkAt = new Date(claimAt.getTime() + 10);
+    // Fresh lease (huge staleMs) → cutoff far in the past → nothing reclaimed.
+    expect(store.reclaimStale(checkAt, 60 * 60 * 1000)).toBe(0);
+    // Treat any lease as stale (staleMs=0 → cutoff=checkAt > claimed_at) → reclaimed.
+    expect(store.reclaimStale(checkAt, 0)).toBe(1);
+    expect(store.get(job.id)?.running).toBe(false);
+  });
+});
+
+describe('notify defaults', () => {
+  it('defaults notifyOn to always when a target is set', () => {
+    const job = store.add({ name: 'n', cron: '0 9 * * *', command: 'echo hi', notifyAgent: 'agentB' });
+    expect(job.notifyAgent).toBe('agentB');
+    expect(job.notifyOn).toBe('always');
+  });
+  it('honors notifyOn=error', () => {
+    const job = store.add({ name: 'n', cron: '0 9 * * *', command: 'echo hi', notifyAgent: 'agentB', notifyOn: 'error' });
+    expect(job.notifyOn).toBe('error');
+  });
+  it('rejects a bad notifyOn', () => {
+    expect(() => store.add({ name: 'n', cron: '0 9 * * *', command: 'x', notifyAgent: 'a', notifyOn: 'sometimes' as never })).toThrow();
+  });
+});
+
 describe('computeNextRun', () => {
   it('returns null for a past one-time job', () => {
     expect(computeNextRun({ scheduleKind: 'once', cron: null, runAt: new Date(Date.now() - 1000).toISOString() }, new Date())).toBeNull();
